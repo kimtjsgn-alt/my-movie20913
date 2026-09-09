@@ -2,6 +2,7 @@ import datetime
 import requests
 import pandas as pd
 import streamlit as st
+import altair as alt
 from pytz import timezone
 
 # -----------------------------------------------------------------------------
@@ -51,7 +52,7 @@ def fetch_daily_box_office(target_date: str, api_key: str):
         
     data = response.json()
     
-    # 2. KOBIS 오류 상자(faultInfo) 체크 (인증키 오류 등 발생 시 HTTP 200과 함께 faultInfo가 옴)
+    # 2. KOBIS 오류 상자(faultInfo) 체크
     if "faultInfo" in data:
         message = data["faultInfo"].get("message", "알 수 없는 오류가 발생했습니다.")
         raise Exception(f"KOBIS 오류 발생: {message}")
@@ -91,13 +92,12 @@ st.caption(f"📅 기준일자: {formatted_date} (한국 시간 기준)")
 
 # API 데이터 불러오기 및 시각화 처리
 try:
-    # API 호출 (또는 1시간 이내 캐시된 결과 가져오기)
     raw_data = fetch_daily_box_office(target_date, API_KEY)
     
-    # 데이터프레임(표 형태) 데이터 구조로 변환
+    # 데이터프레임 변환
     df = pd.DataFrame(raw_data)
     
-    # API 응답 결과가 모두 '문자열(String)' 형태이므로, 숫자형(Numeric)으로 변환
+    # 숫자 문자열을 실제 숫자형 데이터로 변환
     df["rank"] = pd.to_numeric(df["rank"])
     df["rankInten"] = pd.to_numeric(df["rankInten"])
     df["audiCnt"] = pd.to_numeric(df["audiCnt"])
@@ -109,7 +109,6 @@ try:
     # -------------------------------------------------------------------------
     top_movie = df.iloc[0]  # 1위 영화 데이터
     
-    # 전일 대비 순위 변동 표시 텍스트 생성
     rank_inten = top_movie["rankInten"]
     if rank_inten > 0:
         rank_delta = f"▲ {rank_inten}"
@@ -128,40 +127,42 @@ try:
     st.markdown("---")
 
     # -------------------------------------------------------------------------
-    # 나. 관객수 상위 5편 (관객수 오름차순 정렬: 5위 ➡️ 1위) 막대그래프 시각화
+    # 나. 관객수 상위 5편 막대그래프 (Altair를 이용해 오름차순 순서 완벽 고정)
     # -------------------------------------------------------------------------
     st.subheader("📊 관객수 상위 5편 (관객수 적은 순 ➡️ 많은 순)")
     
-    # 1~5위 영화 추출 후, 관객수(audiCnt) 기준 오름차순(ascending=True) 정렬
+    # 1~5위 영화 추출 후 관객수 오름차순 정렬
     top5_asc_df = df.head(5).sort_values(by="audiCnt", ascending=True)
     
-    # 차트에 표시하기 위해 영화명을 인덱스로 세팅하고 관객수 컬럼 선택
-    chart_data = top5_asc_df.set_index("movieNm")[["audiCnt"]]
-    chart_data.columns = ["일일 관객수"]
+    # Altair 차트 작성 (sort='x' 옵션으로 관객수 오름차순 순서를 강제 지정)
+    chart = alt.Chart(top5_asc_df).mark_bar().encode(
+        x=alt.X('movieNm:N', sort=top5_asc_df['movieNm'].tolist(), title="영화명"),
+        y=alt.Y('audiCnt:Q', title="일일 관객수"),
+        tooltip=['movieNm', 'audiCnt']
+    ).properties(
+        height=350
+    )
     
-    st.bar_chart(chart_data)
+    st.altair_chart(chart, use_container_width=True)
 
     st.markdown("---")
 
     # -------------------------------------------------------------------------
-    # 다. 전체 영화 목록 표(Table) 시각화 - 관객수 오름차순 정렬 적용
+    # 다. 전체 영화 목록 표(Table) 시각화 - 관객수 오름차순 정렬
     # -------------------------------------------------------------------------
     st.subheader("📋 전체 박스오피스 순위 (일일 관객수 오름차순 정렬)")
     
-    # 전체 영화를 일일 관객수(audiCnt) 기준 오름차순(ascending=True)으로 정렬
+    # 전체 영화 목록도 관객수 오름차순으로 정렬
     df_sorted = df.sort_values(by="audiCnt", ascending=True)
     
-    # 화면에 보여줄 컬럼만 추출
     display_df = df_sorted[[
         "rank", "movieNm", "openDt", "audiCnt", "audiAcc", "scrnCnt"
     ]].copy()
     
-    # 한글 컬럼명 변경
     display_df.columns = [
         "순위", "영화명", "개봉일", "일일 관객수", "누적 관객수", "스크린 수"
     ]
 
-    # Streamlit 표 데이터 출력 (숫자에 '명', '개' 및 천 단위 쉼표 포맷팅 적용)
     st.dataframe(
         display_df,
         use_container_width=True,
@@ -174,7 +175,6 @@ try:
     )
 
 except Exception as e:
-    # 요청 실패, faultInfo 수신, 영화 목록이 비어있을 때 안내 메시지 표시
     st.error(f"❌ 박스오피스 정보를 불러오는 데 실패했습니다: {e}")
     st.warning(
         """
