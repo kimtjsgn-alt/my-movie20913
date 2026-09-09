@@ -9,25 +9,25 @@ from pytz import timezone
 # 1. Streamlit 페이지 기본 설정
 # -----------------------------------------------------------------------------
 st.set_page_config(
-    page_title="어제자 일별 박스오피스",
+    page_title="일별 박스오피스 조회",
     page_icon="🎬",
     layout="wide"
 )
 
-st.title("🎬 어제자 박스오피스 TOP 10")
+st.title("🎬 일별 박스오피스 조회")
 
 # -----------------------------------------------------------------------------
 # 2. 한국 시간(KST) 기준 '어제' 날짜 계산 함수
 # -----------------------------------------------------------------------------
-def get_yesterday_kst_string() -> str:
+def get_yesterday_kst_date() -> datetime.date:
     """
     배포 서버의 시계 설정과 상관없이 한국 시간(Asia/Seoul)을 기준으로
-    '어제' 날짜를 구해 'YYYYMMDD' 형태의 8자리 문자열로 반환합니다.
+    '어제' 날짜(datetime.date 객체)를 반환합니다.
     """
     kst = timezone('Asia/Seoul')
     now_kst = datetime.datetime.now(kst)
     yesterday_kst = now_kst - datetime.timedelta(days=1)
-    return yesterday_kst.strftime('%Y%m%d')
+    return yesterday_kst.date()
 
 # -----------------------------------------------------------------------------
 # 3. KOBIS API 데이터 호출 및 1시간 기억(캐싱) 함수
@@ -62,7 +62,7 @@ def fetch_daily_box_office(target_date: str, api_key: str):
     daily_list = box_office_result.get("dailyBoxOfficeList", [])
     
     if not daily_list:
-        raise Exception("해당 날짜의 영화 목록 데이터가 비어 있습니다.")
+        raise Exception("그날은 아직 집계 전입니다.")
         
     return daily_list
 
@@ -84,15 +84,25 @@ except Exception:
     )
     st.stop()
 
-# 한국 시간 기준 어제 날짜 구하기
-target_date = get_yesterday_kst_string()
-formatted_date = f"{target_date[:4]}년 {target_date[4:6]}월 {target_date[6:]}일"
+# 한국 시간 기준 어제 날짜 구하기 (달력 선택 최대 범위 제한용)
+yesterday_date = get_yesterday_kst_date()
 
-st.caption(f"📅 기준일자: {formatted_date} (한국 시간 기준)")
+# 📅 사이드바 또는 메인 화면에서 날짜 선택
+selected_date = st.date_input(
+    "조회할 날짜를 선택하세요 (최대 선택 가능: 어제)",
+    value=yesterday_date,
+    max_value=yesterday_date,
+    min_value=datetime.date(2004, 1, 1)  # KOBIS 제공 최소 날짜 범위
+)
+
+target_date_str = selected_date.strftime('%Y%m%d')
+formatted_date = selected_date.strftime('%Y년 %m월 %d일')
+
+st.caption(f"📅 조회 기준일자: {formatted_date}")
 
 # API 데이터 불러오기 및 시각화 처리
 try:
-    raw_data = fetch_daily_box_office(target_date, API_KEY)
+    raw_data = fetch_daily_box_office(target_date_str, API_KEY)
     
     # 데이터프레임 변환
     df = pd.DataFrame(raw_data)
@@ -117,7 +127,12 @@ try:
     else:
         rank_delta = "변동 없음"
 
-    st.subheader(f"🥇 1위 영화 : {top_movie['movieNm']}")
+    # 누적 관객 100만 명 초과 시 트로피 붙이기
+    top_movie_name = top_movie['movieNm']
+    if top_movie['audiAcc'] >= 1000000:
+        top_movie_name += " 🏆"
+
+    st.subheader(f"🥇 1위 영화 : {top_movie_name}")
     
     col1, col2, col3 = st.columns(3)
     col1.metric("일일 관객수", f"{top_movie['audiCnt']:,} 명", delta=rank_delta)
@@ -127,14 +142,14 @@ try:
     st.markdown("---")
 
     # -------------------------------------------------------------------------
-    # 나. 관객수 상위 5편 막대그래프 (Altair를 이용해 오름차순 순서 완벽 고정)
+    # 나. 관객수 상위 5편 막대그래프 (Altair 이용, 오름차순 고정)
     # -------------------------------------------------------------------------
     st.subheader("📊 관객수 상위 5편 (관객수 적은 순 ➡️ 많은 순)")
     
     # 1~5위 영화 추출 후 관객수 오름차순 정렬
     top5_asc_df = df.head(5).sort_values(by="audiCnt", ascending=True)
     
-    # Altair 차트 작성 (sort='x' 옵션으로 관객수 오름차순 순서를 강제 지정)
+    # Altair 차트 생성
     chart = alt.Chart(top5_asc_df).mark_bar().encode(
         x=alt.X('movieNm:N', sort=top5_asc_df['movieNm'].tolist(), title="영화명"),
         y=alt.Y('audiCnt:Q', title="일일 관객수"),
@@ -148,19 +163,40 @@ try:
     st.markdown("---")
 
     # -------------------------------------------------------------------------
-    # 다. 전체 영화 목록 표(Table) 시각화 - 관객수 오름차순 정렬
+    # 다. 전체 영화 목록 표(Table) 시각화 - 오름차순 및 텍스트 가공
     # -------------------------------------------------------------------------
     st.subheader("📋 전체 박스오피스 순위 (일일 관객수 오름차순 정렬)")
     
-    # 전체 영화 목록도 관객수 오름차순으로 정렬
+    # 1. 순위 증감(rankInten) 표시 가공 함수 (양수:🔺, 음수:🔹)
+    def format_rank_inten(val):
+        if val > 0:
+            return f"🔺 {val}"
+        elif val < 0:
+            return f"🔹 {abs(val)}"
+        else:
+            return "-"
+
+    # 2. 누적관객 100만 명 초과 시 영화명에 🏆 표시 가공 함수
+    def format_movie_title(row):
+        title = row['movieNm']
+        if row['audiAcc'] >= 1000000:
+            title += " 🏆"
+        return title
+
+    # 가공 컬럼 생성
+    df["rank_change"] = df["rankInten"].apply(format_rank_inten)
+    df["display_movieNm"] = df.apply(format_movie_title, axis=1)
+
+    # 일일 관객수(audiCnt) 기준 오름차순 정렬
     df_sorted = df.sort_values(by="audiCnt", ascending=True)
     
+    # 화면에 출력할 표 컬럼 선택
     display_df = df_sorted[[
-        "rank", "movieNm", "openDt", "audiCnt", "audiAcc", "scrnCnt"
+        "rank", "rank_change", "display_movieNm", "openDt", "audiCnt", "audiAcc", "scrnCnt"
     ]].copy()
     
     display_df.columns = [
-        "순위", "영화명", "개봉일", "일일 관객수", "누적 관객수", "스크린 수"
+        "순위", "전날 대비", "영화명", "개봉일", "일일 관객수", "누적 관객수", "스크린 수"
     ]
 
     st.dataframe(
@@ -175,12 +211,17 @@ try:
     )
 
 except Exception as e:
-    st.error(f"❌ 박스오피스 정보를 불러오는 데 실패했습니다: {e}")
-    st.warning(
-        """
-        **💡 아래 사항을 확인해 주세요:**
-        1. **인증키(KOBIS_KEY)가 정확한지 확인**: Streamlit Cloud Secrets에 입력한 키 값이 맞는지 확인해 주세요.
-        2. **일일 호출 한도 초과 여부**: KOBIS API는 하루 최대 3,000회까지만 요청할 수 있습니다.
-        3. **집계 마감 시간 안내**: 새벽 일찍 접속 시 영화진흥위원회의 전일 자 박스오피스 집계가 진행 중일 수 있습니다.
-        """
-    )
+    # 예외 발생 시 한국어로 안내 처리
+    error_msg = str(e)
+    if "그날은 아직 집계 전입니다" in error_msg:
+        st.warning("⚠️ 선택하신 날짜의 영화 목록이 비어 있습니다. **그날은 아직 집계 전입니다.**")
+    else:
+        st.error(f"❌ 박스오피스 정보를 불러오는 데 실패했습니다: {e}")
+        st.warning(
+            """
+            **💡 아래 사항을 확인해 주세요:**
+            1. **인증키(KOBIS_KEY)가 정확한지 확인**: Streamlit Cloud Secrets에 입력한 키 값이 맞는지 확인해 주세요.
+            2. **일일 호출 한도 초과 여부**: KOBIS API는 하루 최대 3,000회까지만 요청할 수 있습니다.
+            3. **집계 마감 시간 안내**: 새벽 일찍 접속 시 영화진흥위원회의 집계가 진행 중일 수 있습니다.
+            """
+        )
